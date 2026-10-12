@@ -175,12 +175,13 @@ function App() {
   const register = (e: FormEvent) => {
     e.preventDefault()
     run(async () => {
-      const r = await api<{ verification_url?: string }>('/api/auth/register', {
+      const r = await api<{ verification_url?: string; already_registered?: boolean }>('/api/auth/register', {
         method: 'POST',
         body: JSON.stringify({ name, email, password }),
       })
       setDevToken(r.verification_url ? (new URL(r.verification_url).searchParams.get('token') ?? '') : '')
       setStep('verify')
+      if (r.already_registered) setInfo('This email is already registered but not verified. Please verify your email again.')
     })
   }
 

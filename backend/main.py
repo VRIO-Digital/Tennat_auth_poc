@@ -551,7 +551,7 @@ def register(
         .first()
     )
 
-    if existing_user:
+    if existing_user and existing_user.email_verified:
 
         raise HTTPException(
             status_code=409,
@@ -561,6 +561,41 @@ def register(
     verification_token = (
         secrets.token_urlsafe(32)
     )
+
+    # Registered earlier but never verified: refresh the details and
+    # ask them to verify again instead of blocking the email.
+    if existing_user:
+
+        existing_user.name = data.name.strip()
+
+        existing_user.password_hash = hash_password(data.password)
+
+        existing_user.verification_token = verification_token
+
+        existing_user.verification_expires = (
+            datetime.utcnow()
+            + timedelta(minutes=settings.VERIFICATION_EXPIRE_MINUTES)
+        )
+
+        db.commit()
+
+        response = {
+            "message":
+                "This email is registered but not verified. "
+                "Please verify your email again.",
+            "user_id": existing_user.id,
+            "email": existing_user.email,
+            "already_registered": True,
+        }
+
+        if EXPOSE_VERIFICATION_URL:
+
+            response["verification_url"] = (
+                f"{API_BASE_URL}/api/auth/verify-email"
+                f"?token={verification_token}"
+            )
+
+        return response
 
     user = User(
 
