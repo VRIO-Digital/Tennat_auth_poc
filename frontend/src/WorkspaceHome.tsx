@@ -569,6 +569,96 @@ function ProvidersCard({ ws, token }: { ws: Workspace; token: string }) {
   )
 }
 
+type LoginEvent = {
+  id: number
+  name: string
+  email: string
+  method: string
+  success: boolean
+  reason: string | null
+  ip_address: string | null
+  user_agent: string | null
+  created_at: string
+}
+
+const methodLabel = (m: string) => (m === 'password' ? 'Password' : `SSO · ${m.replace('sso:', '').replace(/_/g, ' ')}`)
+
+function LoginHistoryCard({ ws, token }: { ws: Workspace; token: string }) {
+  const [events, setEvents] = useState<LoginEvent[] | null>(null)
+  const [query, setQuery] = useState('')
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    api<LoginEvent[]>(`/api/workspaces/${ws.workspace_id}/login-history`, { token })
+      .then(setEvents)
+      .catch((e: Error) => setError(e.message))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const rows = (events ?? []).filter((e) => `${e.name} ${e.email} ${e.ip_address ?? ''}`.toLowerCase().includes(query.toLowerCase()))
+
+  return (
+    <section className="panel table-panel">
+      <div className="toolbar">
+        <div className="toolbar-left">
+          <input className="search" placeholder="Search by user, email or IP…" value={query} onChange={(e) => setQuery(e.target.value)} />
+        </div>
+      </div>
+      <Notice error={error} ok="" />
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th>User</th>
+              <th>Method</th>
+              <th>Result</th>
+              <th>IP address</th>
+              <th>Device</th>
+              <th>When</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((e) => (
+              <tr key={e.id}>
+                <td>
+                  <div className="cell-user">
+                    <div className={`avatar ${e.success ? '' : 'ghost'}`}>{e.name.charAt(0).toUpperCase()}</div>
+                    <div>
+                      <strong>{e.name}</strong>
+                      <div className="muted-cell">{e.email}</div>
+                    </div>
+                  </div>
+                </td>
+                <td>
+                  <span className="badge">{methodLabel(e.method)}</span>
+                </td>
+                <td>
+                  <span className={`status ${e.success ? 'active' : 'inactive'}`} title={e.reason ?? ''}>
+                    {e.success ? 'Success' : (e.reason ?? 'Failed')}
+                  </span>
+                </td>
+                <td className="muted-cell">{e.ip_address ?? '—'}</td>
+                <td className="muted-cell" title={e.user_agent ?? ''}>
+                  {(e.user_agent ?? '—').slice(0, 40)}
+                </td>
+                <td className="muted-cell">{new Date(e.created_at).toLocaleString()}</td>
+              </tr>
+            ))}
+            {events && !rows.length && (
+              <tr>
+                <td colSpan={6} className="empty-cell">
+                  No logins recorded yet
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div className="table-foot">Showing the latest {rows.length} sign-in attempts</div>
+    </section>
+  )
+}
+
 type Empty = { title: string; text: string; cta?: { label: string; to: string } }
 type NavItem = { key: string; label: string; icon: IconName; blurb: string; empty?: Empty }
 
@@ -633,6 +723,7 @@ const MAIN_NAV: NavItem[] = [
 
 const MANAGE_NAV: NavItem[] = [
   { key: 'users', label: 'Users', icon: 'users', blurb: 'Invite people and manage who can access this workspace.' },
+  { key: 'history', label: 'Login History', icon: 'clock', blurb: 'Every sign-in to this workspace, successful or not.' },
   { key: 'settings', label: 'Settings', icon: 'settings', blurb: 'Single sign-on for your workspace.' },
 ]
 
@@ -664,11 +755,13 @@ export default function WorkspaceHome({
   )
 
   let body
-  if (tab === 'users' || tab === 'settings') {
+  if (tab === 'users' || tab === 'settings' || tab === 'history') {
     body = !owner ? (
-      <p className="muted">Only the workspace owner can manage users and settings.</p>
+      <p className="muted">Only the workspace owner can manage users, settings and login history.</p>
     ) : tab === 'users' ? (
       <UsersCard ws={ws} token={token} />
+    ) : tab === 'history' ? (
+      <LoginHistoryCard ws={ws} token={token} />
     ) : (
       <ProvidersCard ws={ws} token={token} />
     )

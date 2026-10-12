@@ -9,7 +9,7 @@ import uuid
 import zlib
 from urllib.parse import urlencode
 
-from fastapi import FastAPI, HTTPException, Depends, Form
+from fastapi import FastAPI, HTTPException, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
@@ -324,6 +324,68 @@ class AuthProvider(Base):
 
 
 # =========================================================
+# LOGIN HISTORY
+# =========================================================
+
+class LoginEvent(Base):
+
+    __tablename__ = "login_events"
+
+    id: Mapped[int] = mapped_column(
+        primary_key=True
+    )
+
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"),
+        index=True,
+        nullable=True,
+    )
+
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"),
+        index=True,
+        nullable=True,
+    )
+
+    email: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+    )
+
+    # "password" or "sso:<provider key>"
+    method: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+    )
+
+    success: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+    )
+
+    reason: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
+    ip_address: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+
+    user_agent: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        default=datetime.utcnow,
+        index=True,
+        nullable=False,
+    )
+
+
+# =========================================================
 # CREATE TABLES
 # =========================================================
 
@@ -463,6 +525,40 @@ def accept_invites(db: Session, user: User):
             )
 
         db.delete(invite)
+
+    db.commit()
+
+
+def record_login(
+    db: Session,
+    request: Request,
+    email: str,
+    method: str,
+    success: bool,
+    user: User | None = None,
+    workspace_id: int | None = None,
+    reason: str | None = None,
+):
+
+    forwarded = request.headers.get("x-forwarded-for", "")
+
+    ip = (
+        forwarded.split(",")[0].strip()
+        or (request.client.host if request.client else "")
+    )
+
+    db.add(
+        LoginEvent(
+            user_id=user.id if user else None,
+            workspace_id=workspace_id,
+            email=email[:200],
+            method=method,
+            success=success,
+            reason=reason,
+            ip_address=ip[:64] or None,
+            user_agent=request.headers.get("user-agent", "")[:255] or None,
+        )
+    )
 
     db.commit()
 
@@ -787,6 +883,7 @@ def verify_email(
 @app.post("/api/auth/login")
 def login(
     data: LoginRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ):
 
@@ -802,6 +899,8 @@ def login(
 
     if not user:
 
+        record_login(db, request, email, "password", False, reason="Unknown email")
+
         raise HTTPException(
             status_code=401,
             detail="Invalid email or password",
@@ -812,6 +911,8 @@ def login(
         user.password_hash,
     ):
 
+        record_login(db, request, email, "password", False, user, reason="Wrong password")
+
         raise HTTPException(
             status_code=401,
             detail="Invalid email or password",
@@ -821,12 +922,16 @@ def login(
 
     if not user.email_verified:
 
+        record_login(db, request, email, "password", False, user, reason="Email not verified")
+
         raise HTTPException(
             status_code=403,
             detail="Please verify your email first",
         )
 
     accept_invites(db, user)
+
+    record_login(db, request, email, "password", True, user)
 
     access_token = (
         create_access_token(
@@ -1946,6 +2051,7 @@ def saml_login(
 def saml_acs(
     slug: str,
     key: str,
+    request: Request,
     SAMLResponse: str = Form(...),
     RelayState: str = Form(""),
     db: Session = Depends(get_db),
@@ -1957,7 +2063,16 @@ def saml_acs(
 
     workspace_url = f"{URL_SCHEME}://{workspace.slug}.{BASE_DOMAIN}"
 
-    def fail(message: str):
+    method = f"sso:{key}"
+
+    def fail(message: str, email: str = "", user: User | None = None):
+
+        if not is_test:
+
+            record_login(
+                db, request, email or "unknown", method, False,
+                user, workspace.id, message,
+            )
 
         if is_test:
 
@@ -2025,7 +2140,9 @@ def saml_acs(
 
     elif not member.active:
 
-        return fail("Your account in this workspace is deactivated")
+        return fail("Your account in this workspace is deactivated", email, user)
+
+    record_login(db, request, email, method, True, user, workspace.id)
 
     return RedirectResponse(
         f"{workspace_url}/#token={create_access_token(user.id)}",
@@ -2105,6 +2222,50 @@ def test_auth_provider(
             else None
         ),
     }
+
+
+@app.get("/api/workspaces/{workspace_id}/login-history")
+def login_history(
+    workspace_id: int,
+    limit: int = 200,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+
+    workspace = get_owned_workspace(workspace_id, user, db)
+
+    member_ids = (
+        db.query(WorkspaceUser.user_id)
+        .filter(WorkspaceUser.workspace_id == workspace.id)
+        .scalar_subquery()
+    )
+
+    events = (
+        db.query(LoginEvent, User.name)
+        .outerjoin(User, User.id == LoginEvent.user_id)
+        .filter(
+            (LoginEvent.workspace_id == workspace.id)
+            | (LoginEvent.user_id.in_(member_ids))
+        )
+        .order_by(LoginEvent.created_at.desc())
+        .limit(max(1, min(limit, 500)))
+        .all()
+    )
+
+    return [
+        {
+            "id": e.id,
+            "name": name or e.email.split("@")[0],
+            "email": e.email,
+            "method": e.method,
+            "success": e.success,
+            "reason": e.reason,
+            "ip_address": e.ip_address,
+            "user_agent": e.user_agent,
+            "created_at": e.created_at.isoformat() + "Z",
+        }
+        for e, name in events
+    ]
 
 
 # =========================================================

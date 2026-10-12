@@ -26,6 +26,7 @@ const PATHS: Record<string, string> = {
   chat: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z',
   flask: 'M9 3h6 M10 3v6L4.5 19a2 2 0 0 0 1.7 3h11.6a2 2 0 0 0 1.7-3L14 9V3 M7.5 14h9',
   circleCheck: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M8 12l3 3 5-6',
+  clock: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M12 6v6l4 2',
   refresh: 'M3 12a9 9 0 1 0 3-6.7L3 8 M3 3v5h5',
 }
 
