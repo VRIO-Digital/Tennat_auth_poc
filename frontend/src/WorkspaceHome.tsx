@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { api, config, type Workspace } from './lib/api'
+import { api, type Workspace } from './lib/api'
 import Icon, { type IconName } from './Icon'
 import ProviderLogo from './ProviderLogo'
 
@@ -60,7 +60,6 @@ type Members = {
   members: { user_id: number; name: string; email: string; role: string; active: boolean }[]
   invites: { id: number; email: string; role: string }[]
 }
-type Domain = { domain: string | null; cname_host: string | null; cname_target: string }
 
 function useAction() {
   const [error, setError] = useState('')
@@ -392,119 +391,6 @@ function UsersCard({ ws, token }: { ws: Workspace; token: string }) {
   )
 }
 
-function AddressCard({ ws, token }: { ws: Workspace; token: string }) {
-  const [slug, setSlug] = useState(ws.slug)
-  const [status, setStatus] = useState<{ available: boolean; reason: string | null } | null>(null)
-  const { error, busy, run } = useAction()
-  const suffix = `.${config.baseDomain}`
-  const changed = slug !== ws.slug
-
-  useEffect(() => {
-    setStatus(null)
-    if (!changed) return
-    const t = setTimeout(() => {
-      api<{ available: boolean; reason: string | null }>(`/api/workspaces/check-slug?slug=${encodeURIComponent(slug)}&workspace_id=${ws.workspace_id}`)
-        .then(setStatus)
-        .catch(() => undefined)
-    }, 350)
-    return () => clearTimeout(t)
-  }, [slug, changed, ws.workspace_id])
-
-  const save = (e: FormEvent) => {
-    e.preventDefault()
-    if (!window.confirm(`Change your workspace address to ${slug}${suffix}? The old address will stop working and you'll be redirected.`)) return
-    run(async () => {
-      const r = await api<{ url: string }>(`/api/workspaces/${ws.workspace_id}/slug`, { method: 'PUT', token, body: JSON.stringify({ slug }) })
-      location.href = `${r.url}/#token=${encodeURIComponent(token)}`
-    })
-  }
-
-  return (
-    <section className="panel">
-      <h3>Workspace address</h3>
-      <p className="muted">The web address your team uses to open this workspace.</p>
-      <form onSubmit={save}>
-        <div className="input addr">
-          <input value={slug} onChange={(e) => setSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))} required minLength={3} maxLength={40} aria-label="Workspace address" />
-          <em>{suffix}</em>
-        </div>
-        {changed && status && (
-          <p className={`hint-line ${status.available ? 'good' : 'bad'}`}>{status.available ? '✓ Available' : `✗ ${status.reason}`}</p>
-        )}
-        <Notice error={error} ok="" />
-        <div className="form-actions">
-          <button type="button" className="btn-ghost" disabled={!changed} onClick={() => setSlug(ws.slug)}>
-            Reset
-          </button>
-          <button className="primary" disabled={busy || !changed || !status?.available}>
-            {busy ? 'Saving…' : 'Save address'}
-          </button>
-        </div>
-      </form>
-    </section>
-  )
-}
-
-function DomainCard({ ws, token }: { ws: Workspace; token: string }) {
-  const [info, setInfo] = useState<Domain | null>(null)
-  const [domain, setDomain] = useState('')
-  const { error, ok, busy, run } = useAction()
-  const path = `/api/workspaces/${ws.workspace_id}/domain`
-
-  useEffect(() => {
-    api<Domain>(path, { token })
-      .then((d) => {
-        setInfo(d)
-        setDomain(d.domain ?? '')
-      })
-      .catch(() => undefined)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  const save = (e: FormEvent) => {
-    e.preventDefault()
-    run(async () => {
-      setInfo(await api<Domain>(path, { method: 'PUT', token, body: JSON.stringify({ domain }) }))
-      return 'Domain saved. Now add the CNAME record below at your DNS provider.'
-    })
-  }
-
-  return (
-    <section className="panel">
-      <div className="list-head">
-        <h3>Custom domain</h3>
-        <span className={info?.domain ? 'badge pending' : 'badge off'}>{info?.domain ? 'Awaiting DNS' : 'Not set'}</span>
-      </div>
-      <p className="muted">Use your own domain for this workspace.</p>
-      <form className="inline" onSubmit={save}>
-        <input required placeholder="app.example.com" value={domain} onChange={(e) => setDomain(e.target.value)} />
-        <button className="primary" disabled={busy}>
-          Save
-        </button>
-      </form>
-      <Notice error={error} ok={ok} />
-      {info?.domain && (
-        <table className="dns">
-          <thead>
-            <tr>
-              <th>Type</th>
-              <th>Name</th>
-              <th>Value</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>CNAME</td>
-              <td>{info.cname_host}</td>
-              <td>{info.cname_target}</td>
-            </tr>
-          </tbody>
-        </table>
-      )}
-    </section>
-  )
-}
-
 type Provider = {
   key: string
   name: string
@@ -711,7 +597,6 @@ const MAIN_NAV: NavItem[] = [
 
 const MANAGE_NAV: NavItem[] = [
   { key: 'users', label: 'Users', icon: 'users', blurb: 'Invite people and manage who can access this workspace.' },
-  { key: 'domain', label: 'Domain', icon: 'globe', blurb: 'Change your workspace address or connect your own domain.' },
   { key: 'settings', label: 'Settings', icon: 'settings', blurb: 'Single sign-on for your workspace.' },
 ]
 
@@ -743,16 +628,11 @@ export default function WorkspaceHome({
   )
 
   let body
-  if (tab === 'users' || tab === 'domain' || tab === 'settings') {
+  if (tab === 'users' || tab === 'settings') {
     body = !owner ? (
       <p className="muted">Only the workspace owner can manage users and settings.</p>
     ) : tab === 'users' ? (
       <UsersCard ws={ws} token={token} />
-    ) : tab === 'domain' ? (
-      <>
-        <AddressCard ws={ws} token={token} />
-        <DomainCard ws={ws} token={token} />
-      </>
     ) : (
       <ProvidersCard ws={ws} token={token} />
     )
