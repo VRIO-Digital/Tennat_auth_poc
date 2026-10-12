@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
-import { api, BASE_DOMAIN, type User, type Workspace } from './lib/api'
+import { api, config, type User, type Workspace } from './lib/api'
 import WorkspaceHome from './WorkspaceHome'
 import Icon, { type IconName } from './Icon'
 import './App.css'
@@ -67,7 +67,7 @@ function slugify(s: string) {
 
 // Tenant subdomain, e.g. "acme" for acme.<BASE_DOMAIN>
 const tenantSlug = (() => {
-  const suffix = `.${BASE_DOMAIN}`
+  const suffix = `.${config.baseDomain}`
   if (!location.host.endsWith(suffix)) return null
   const slug = location.host.slice(0, -suffix.length)
   return slug && !slug.includes('.') ? slug : null

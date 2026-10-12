@@ -1,7 +1,17 @@
 export const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 
-// Workspaces live at {slug}.{BASE_DOMAIN}
-export const BASE_DOMAIN: string = import.meta.env.VITE_BASE_DOMAIN ?? 'localhost:5173'
+// Workspaces live at {slug}.{baseDomain}. The value comes from the backend
+// (BASE_DOMAIN there) so it is configured in one place only.
+export const config = { baseDomain: 'localhost:5173' }
+
+export async function loadConfig() {
+  try {
+    const res = await fetch(`${API_URL}/api/config`, { signal: AbortSignal.timeout(20000) })
+    if (res.ok) config.baseDomain = (await res.json()).base_domain
+  } catch {
+    // keep the default; the app still works on the main site
+  }
+}
 
 export async function api<T>(
   path: string,

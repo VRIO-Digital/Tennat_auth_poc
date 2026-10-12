@@ -513,6 +513,15 @@ class WorkspaceRequest(BaseModel):
 # HEALTH
 # =========================================================
 
+@app.get("/api/config")
+def public_config():
+
+    return {
+        "base_domain": BASE_DOMAIN,
+        "url_scheme": URL_SCHEME,
+    }
+
+
 @app.get("/api/health")
 def health():
 
