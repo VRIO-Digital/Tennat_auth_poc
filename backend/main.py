@@ -612,6 +612,61 @@ def register(
 
 
 # =========================================================
+# RESEND VERIFICATION
+# =========================================================
+
+class ResendRequest(BaseModel):
+
+    email: EmailStr
+
+
+@app.post("/api/auth/resend-verification")
+def resend_verification(
+    data: ResendRequest,
+    db: Session = Depends(get_db),
+):
+
+    email = data.email.lower().strip()
+
+    user = (
+        db.query(User)
+        .filter(User.email == email)
+        .first()
+    )
+
+    response = {
+        "message":
+            "If the account exists and is not verified, "
+            "a new verification link has been sent.",
+    }
+
+    # Same answer for unknown / already verified emails
+    if not user or user.email_verified:
+
+        return response
+
+    token = secrets.token_urlsafe(32)
+
+    user.verification_token = token
+
+    user.verification_expires = (
+        datetime.utcnow()
+        + timedelta(minutes=settings.VERIFICATION_EXPIRE_MINUTES)
+    )
+
+    db.commit()
+
+    # Development only: no email is sent, so hand back the link
+    if EXPOSE_VERIFICATION_URL:
+
+        response["verification_url"] = (
+            f"{API_BASE_URL}/api/auth/verify-email?token={token}"
+        )
+
+    return response
+
+
+# =========================================================
 # VERIFY EMAIL
 # =========================================================
 

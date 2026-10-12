@@ -184,27 +184,61 @@ function App() {
     })
   }
 
+  const requestVerification = async () => {
+    const r = await api<{ verification_url?: string }>('/api/auth/resend-verification', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    })
+    setDevToken(r.verification_url ? (new URL(r.verification_url).searchParams.get('token') ?? '') : '')
+  }
+
+  const signIn = async () => {
+    const r = await api<{ access_token: string }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    })
+    ;(remember ? localStorage : sessionStorage).setItem(TOKEN_KEY, r.access_token)
+    setToken(r.access_token)
+    await loadSession(r.access_token)
+  }
+
   const verifyToken = (e: FormEvent) => {
     e.preventDefault()
     run(async () => {
       await api(`/api/auth/verify-email?token=${encodeURIComponent(vToken.trim())}`)
       setVToken('')
-      setPassword('')
-      setStep('login')
-      setInfo('Email verified. Please log in.')
+      setDevToken('')
+      // We still have the credentials from register/login: sign in automatically
+      if (email && password) {
+        await signIn()
+      } else {
+        setStep('login')
+        setInfo('Email verified. Please log in.')
+      }
     })
   }
+
+  const resend = () =>
+    run(async () => {
+      await requestVerification()
+      setInfo('A new verification link has been sent.')
+    })
 
   const login = (e: FormEvent) => {
     e.preventDefault()
     run(async () => {
-      const r = await api<{ access_token: string }>('/api/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ email, password }),
-      })
-      ;(remember ? localStorage : sessionStorage).setItem(TOKEN_KEY, r.access_token)
-      setToken(r.access_token)
-      await loadSession(r.access_token)
+      try {
+        await signIn()
+      } catch (err) {
+        // Account exists but email isn't verified yet: continue to verification
+        if ((err as Error).message === 'Please verify your email first') {
+          await requestVerification()
+          setStep('verify')
+          setInfo('Your email isn’t verified yet. We sent you a new verification link.')
+          return
+        }
+        throw err
+      }
     })
   }
 
@@ -313,7 +347,7 @@ function App() {
             </button>
           </form>
           <p className="alt">
-            Didn't receive the email? <button className="link" onClick={() => setInfo('Resend is not available yet')}>Resend</button>
+            Didn't receive the email? <button className="link" disabled={busy} onClick={resend}>Resend</button>
           </p>
         </Card>
       )}
