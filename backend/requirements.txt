@@ -8,3 +8,6 @@ bcrypt
 python-multipart
 psycopg[binary]
 alembic
+signxml
+lxml
+cryptography

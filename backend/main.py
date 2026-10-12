@@ -2,8 +2,15 @@ from datetime import datetime, timedelta
 import json
 import re
 import secrets
+import base64
+import copy
+import html
+import uuid
+import zlib
+from urllib.parse import urlencode
 
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Form
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 
@@ -28,6 +35,9 @@ from sqlalchemy.orm import (
 
 import bcrypt
 from jose import jwt
+from lxml import etree
+from signxml import XMLVerifier
+from cryptography import x509
 
 
 # =========================================================
@@ -1214,10 +1224,25 @@ def get_workspace_by_slug(
             detail="Workspace not found",
         )
 
+    enabled = {
+        r.provider
+        for r in db.query(AuthProvider)
+        .filter(
+            AuthProvider.workspace_id == workspace.id,
+            AuthProvider.enabled.is_(True),
+        )
+        .all()
+    }
+
     return {
         "id": workspace.id,
         "name": workspace.name,
         "slug": workspace.slug,
+        "sso_providers": [
+            {"key": m["key"], "name": m["name"]}
+            for m in SAML_PROVIDERS
+            if m["key"] in enabled
+        ],
     }
 
 
@@ -1633,6 +1658,453 @@ def save_auth_provider(
     db.commit()
 
     return {**meta, **provider_view(workspace, provider, row)}
+
+
+# ---------------------------------------------------------
+# SAML login + test connection
+# ---------------------------------------------------------
+
+NS_SAMLP = "urn:oasis:names:tc:SAML:2.0:protocol"
+NS_SAML = "urn:oasis:names:tc:SAML:2.0:assertion"
+NS_DS = "http://www.w3.org/2000/09/xmldsig#"
+CLOCK_SKEW = timedelta(minutes=5)
+
+
+def sp_entity_id(slug: str):
+
+    return f"{URL_SCHEME}://{slug}.{BASE_DOMAIN}/saml/metadata"
+
+
+def sp_acs_url(slug: str, key: str):
+
+    return f"{API_BASE_URL}/api/auth/saml/{slug}/{key}/acs"
+
+
+def normalize_certificate(raw: str):
+
+    raw = raw.strip()
+
+    if "BEGIN CERTIFICATE" not in raw:
+
+        body = "".join(raw.split())
+        lines = [body[i:i + 64] for i in range(0, len(body), 64)]
+        raw = (
+            "-----BEGIN CERTIFICATE-----\n"
+            + "\n".join(lines)
+            + "\n-----END CERTIFICATE-----"
+        )
+
+    return raw
+
+
+def load_certificate(raw: str):
+
+    return x509.load_pem_x509_certificate(
+        normalize_certificate(raw).encode()
+    )
+
+
+def load_provider(slug: str, key: str, db: Session, allow_disabled: bool):
+
+    workspace = (
+        db.query(Workspace)
+        .filter(Workspace.slug == slug.lower().strip())
+        .first()
+    )
+
+    row = (
+        db.query(AuthProvider)
+        .filter(
+            AuthProvider.workspace_id == workspace.id,
+            AuthProvider.provider == key,
+        )
+        .first()
+        if workspace
+        else None
+    )
+
+    if not row or not (row.enabled or allow_disabled):
+
+        raise HTTPException(
+            status_code=404,
+            detail="Single sign-on is not enabled for this workspace",
+        )
+
+    config = json.loads(row.config)
+
+    if not config.get("idp_sso_url") or not config.get("certificate"):
+
+        raise HTTPException(
+            status_code=400,
+            detail="Provider is not fully configured",
+        )
+
+    return workspace, config
+
+
+def build_authn_redirect(slug: str, key: str, config: dict, relay: str):
+
+    request_xml = (
+        f'<samlp:AuthnRequest xmlns:samlp="{NS_SAMLP}" xmlns:saml="{NS_SAML}" '
+        f'ID="_{uuid.uuid4().hex}" Version="2.0" '
+        f'IssueInstant="{datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}" '
+        f'Destination="{html.escape(config["idp_sso_url"])}" '
+        'ProtocolBinding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" '
+        f'AssertionConsumerServiceURL="{html.escape(sp_acs_url(slug, key))}">'
+        f"<saml:Issuer>{html.escape(sp_entity_id(slug))}</saml:Issuer>"
+        "<samlp:NameIDPolicy "
+        'Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress" '
+        'AllowCreate="true"/>'
+        "</samlp:AuthnRequest>"
+    )
+
+    deflater = zlib.compressobj(wbits=-15)
+
+    payload = deflater.compress(request_xml.encode()) + deflater.flush()
+
+    query = urlencode(
+        {
+            "SAMLRequest": base64.b64encode(payload).decode(),
+            "RelayState": relay,
+        }
+    )
+
+    sep = "&" if "?" in config["idp_sso_url"] else "?"
+
+    return f'{config["idp_sso_url"]}{sep}{query}'
+
+
+def parse_time(value: str):
+
+    return datetime.strptime(
+        value.split(".")[0].rstrip("Z"),
+        "%Y-%m-%dT%H:%M:%S",
+    )
+
+
+def read_saml_email(saml_response: str, config: dict, slug: str):
+
+    """Verify the signature and conditions, return the user's email."""
+
+    parser = etree.XMLParser(
+        resolve_entities=False,
+        no_network=True,
+        load_dtd=False,
+    )
+
+    try:
+
+        root = etree.fromstring(
+            base64.b64decode(saml_response),
+            parser,
+        )
+
+        cert = normalize_certificate(config["certificate"])
+
+    except Exception:
+
+        raise ValueError("Malformed SAML response")
+
+    def has_signature(el):
+
+        return el.find(f"{{{NS_DS}}}Signature") is not None
+
+    assertion = (
+        root
+        if root.tag == f"{{{NS_SAML}}}Assertion"
+        else root.find(f".//{{{NS_SAML}}}Assertion")
+    )
+
+    if assertion is None:
+
+        status = root.find(f".//{{{NS_SAMLP}}}StatusCode")
+
+        code = (
+            status.get("Value", "").rsplit(":", 1)[-1]
+            if status is not None
+            else "unknown"
+        )
+
+        raise ValueError(f"Identity provider returned no assertion ({code})")
+
+    signed = None
+
+    for candidate in (root, assertion):
+
+        if has_signature(candidate):
+
+            try:
+
+                signed = XMLVerifier().verify(
+                    copy.deepcopy(candidate),
+                    x509_cert=cert,
+                ).signed_xml
+
+                break
+
+            except Exception:
+
+                raise ValueError(
+                    "Signature check failed: the certificate does not "
+                    "match the one the identity provider signed with"
+                )
+
+    if signed is None:
+
+        raise ValueError("The SAML response is not signed")
+
+    if signed.tag != f"{{{NS_SAML}}}Assertion":
+
+        signed = signed.find(f".//{{{NS_SAML}}}Assertion")
+
+    if signed is None:
+
+        raise ValueError("Signed content has no assertion")
+
+    now = datetime.utcnow()
+
+    conditions = signed.find(f"{{{NS_SAML}}}Conditions")
+
+    if conditions is not None:
+
+        nb = conditions.get("NotBefore")
+        na = conditions.get("NotOnOrAfter")
+
+        if nb and now + CLOCK_SKEW < parse_time(nb):
+
+            raise ValueError("Assertion is not valid yet")
+
+        if na and now - CLOCK_SKEW >= parse_time(na):
+
+            raise ValueError("Assertion has expired")
+
+        audiences = [
+            a.text.strip()
+            for a in conditions.iter(f"{{{NS_SAML}}}Audience")
+            if a.text
+        ]
+
+        if audiences and sp_entity_id(slug) not in audiences:
+
+            raise ValueError(
+                "Entity ID mismatch: the identity provider issued this "
+                f"for a different Entity ID than {sp_entity_id(slug)}"
+            )
+
+    name_id = signed.find(f".//{{{NS_SAML}}}NameID")
+
+    email = (name_id.text or "").strip().lower() if name_id is not None else ""
+
+    if "@" not in email:
+
+        raise ValueError("The identity provider did not send an email address")
+
+    return email
+
+
+def test_page(ok: bool, title: str, detail: str):
+
+    color = "#16a34a" if ok else "#dc2626"
+
+    mark = "&#10003;" if ok else "&#10005;"
+
+    return HTMLResponse(
+        '<!doctype html><meta charset="utf-8">'
+        '<body style="font-family:system-ui;display:grid;place-items:center;'
+        'min-height:100vh;margin:0;background:#f5f5f5">'
+        '<div style="background:#fff;padding:32px 40px;border-radius:20px;'
+        'max-width:460px;text-align:center;box-shadow:0 4px 24px #0001">'
+        f'<div style="font-size:44px;color:{color}">{mark}</div>'
+        f"<h2>{html.escape(title)}</h2>"
+        f'<p style="color:#555">{html.escape(detail)}</p>'
+        "<p><small>You can close this window.</small></p></div></body>"
+    )
+
+
+@app.get("/api/auth/saml/{slug}/{key}/login")
+def saml_login(
+    slug: str,
+    key: str,
+    test: int = 0,
+    db: Session = Depends(get_db),
+):
+
+    workspace, config = load_provider(slug, key, db, allow_disabled=bool(test))
+
+    return RedirectResponse(
+        build_authn_redirect(
+            workspace.slug,
+            key,
+            config,
+            "test" if test else "login",
+        ),
+        status_code=302,
+    )
+
+
+@app.post("/api/auth/saml/{slug}/{key}/acs")
+def saml_acs(
+    slug: str,
+    key: str,
+    SAMLResponse: str = Form(...),
+    RelayState: str = Form(""),
+    db: Session = Depends(get_db),
+):
+
+    is_test = RelayState == "test"
+
+    workspace, config = load_provider(slug, key, db, allow_disabled=is_test)
+
+    workspace_url = f"{URL_SCHEME}://{workspace.slug}.{BASE_DOMAIN}"
+
+    def fail(message: str):
+
+        if is_test:
+
+            return test_page(False, "Connection failed", message)
+
+        return RedirectResponse(
+            f"{workspace_url}/#" + urlencode({"sso_error": message}),
+            status_code=303,
+        )
+
+    try:
+
+        email = read_saml_email(SAMLResponse, config, workspace.slug)
+
+    except ValueError as e:
+
+        return fail(str(e))
+
+    if is_test:
+
+        return test_page(
+            True,
+            "Connection successful",
+            f"Signed in as {email}. Signature, certificate and "
+            "Entity ID all check out.",
+        )
+
+    user = db.query(User).filter(User.email == email).first()
+
+    if not user:
+
+        # Just-in-time provisioning: the IdP vouches for this email
+        user = User(
+            name=email.split("@")[0],
+            email=email,
+            password_hash=hash_password(secrets.token_urlsafe(32)),
+            email_verified=True,
+        )
+
+        db.add(user)
+        db.commit()
+
+    accept_invites(db, user)
+
+    member = (
+        db.query(WorkspaceUser)
+        .filter(
+            WorkspaceUser.workspace_id == workspace.id,
+            WorkspaceUser.user_id == user.id,
+        )
+        .first()
+    )
+
+    if not member:
+
+        db.add(
+            WorkspaceUser(
+                workspace_id=workspace.id,
+                user_id=user.id,
+                role="business_user",
+            )
+        )
+
+        db.commit()
+
+    elif not member.active:
+
+        return fail("Your account in this workspace is deactivated")
+
+    return RedirectResponse(
+        f"{workspace_url}/#token={create_access_token(user.id)}",
+        status_code=303,
+    )
+
+
+@app.post("/api/workspaces/{workspace_id}/auth-providers/{provider}/test")
+def test_auth_provider(
+    workspace_id: int,
+    provider: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+
+    workspace = get_owned_workspace(workspace_id, user, db)
+
+    row = (
+        db.query(AuthProvider)
+        .filter(
+            AuthProvider.workspace_id == workspace.id,
+            AuthProvider.provider == provider,
+        )
+        .first()
+    )
+
+    config = json.loads(row.config) if row else {}
+
+    checks = []
+
+    def check(name: str, ok: bool, detail: str):
+
+        checks.append({"name": name, "ok": ok, "detail": detail})
+
+    sso_url = config.get("idp_sso_url", "")
+
+    check(
+        "SSO URL",
+        sso_url.startswith("https://"),
+        sso_url or "Missing. Must start with https://",
+    )
+
+    check(
+        "Identity provider Entity ID",
+        bool(config.get("idp_entity_id")),
+        config.get("idp_entity_id") or "Missing",
+    )
+
+    try:
+
+        cert = load_certificate(config.get("certificate", ""))
+
+        expires = cert.not_valid_after_utc.replace(tzinfo=None)
+
+        valid = expires > datetime.utcnow()
+
+        check(
+            "Certificate",
+            valid,
+            f"Valid until {expires:%Y-%m-%d}"
+            if valid
+            else f"Expired on {expires:%Y-%m-%d}",
+        )
+
+    except Exception:
+
+        check("Certificate", False, "Could not read the X.509 certificate")
+
+    ok = all(c["ok"] for c in checks)
+
+    return {
+        "ok": ok,
+        "checks": checks,
+        "login_url": (
+            f"{API_BASE_URL}/api/auth/saml/{workspace.slug}/{provider}/login?test=1"
+            if ok
+            else None
+        ),
+    }
 
 
 # =========================================================

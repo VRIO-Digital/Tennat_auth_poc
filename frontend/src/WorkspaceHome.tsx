@@ -404,6 +404,7 @@ function ProviderRow({ ws, token, p, onSaved }: { ws: Workspace; token: string; 
   const [open, setOpen] = useState(false)
   const [cfg, setCfg] = useState(p.config)
   const { error, ok, busy, run } = useAction()
+  const [checks, setChecks] = useState<{ name: string; ok: boolean; detail: string }[]>([])
   const path = `/api/workspaces/${ws.workspace_id}/auth-providers/${p.key}`
 
   useEffect(() => {
@@ -419,6 +420,29 @@ function ProviderRow({ ws, token, p, onSaved }: { ws: Workspace; token: string; 
       onSaved(saved)
       setOpen(false)
     })
+
+  // Save the form, check the config, then run a real sign-in through the IdP in a new tab
+  const testConnection = () => {
+    const popup = window.open('', '_blank')
+    run(async () => {
+      try {
+        setChecks([])
+        const saved = await api<Provider>(path, { method: 'PUT', token, body: JSON.stringify({ enabled: p.enabled, ...cfg }) })
+        onSaved(saved)
+        const r = await api<{ ok: boolean; checks: typeof checks; login_url: string | null }>(`${path}/test`, { method: 'POST', token })
+        setChecks(r.checks)
+        if (!r.ok || !r.login_url) {
+          popup?.close()
+          throw new Error('Fix the items marked below, then test again')
+        }
+        if (popup) popup.location.href = r.login_url
+        return `Opened ${p.name} sign-in in a new tab. Finish signing in there to see the result.`
+      } catch (e) {
+        popup?.close()
+        throw e
+      }
+    })
+  }
 
   return (
     <div className="pcard">
@@ -493,10 +517,22 @@ function ProviderRow({ ws, token, p, onSaved }: { ws: Workspace; token: string; 
             <span>X.509 certificate</span>
             <textarea required rows={4} placeholder="-----BEGIN CERTIFICATE-----" value={cfg.certificate} onChange={(e) => setCfg({ ...cfg, certificate: e.target.value })} />
           </label>
+          {checks.length > 0 && (
+            <ul className="checks">
+              {checks.map((c) => (
+                <li key={c.name} className={c.ok ? 'pass' : 'fail'}>
+                  <b>{c.ok ? '✓' : '✕'}</b> <span>{c.name}</span> <small>{c.detail}</small>
+                </li>
+              ))}
+            </ul>
+          )}
           <Notice error={error} ok={ok} />
           <div className="modal-actions">
             <button type="button" className="secondary" onClick={() => setOpen(false)}>
               Cancel
+            </button>
+            <button type="button" className="secondary" disabled={busy || !cfg.idp_sso_url || !cfg.certificate} onClick={testConnection}>
+              Test connection
             </button>
             <button className="primary" disabled={busy}>
               {busy ? 'Saving…' : 'Save & enable'}

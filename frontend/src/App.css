@@ -435,3 +435,13 @@ form { display: flex; flex-direction: column; gap: 16px; }
 .hint-line.bad { color: #b91c1c; }
 .form-actions { display: flex; justify-content: flex-end; gap: 12px; }
 .btn-ghost:disabled { opacity: .5; cursor: not-allowed; }
+
+/* SSO sign-in + test connection */
+.sso-list { display: flex; flex-direction: column; gap: 10px; }
+.sso-btn { display: flex; align-items: center; justify-content: center; gap: 10px; height: 48px; border: 1px solid var(--border); border-radius: 999px; background: #fff; color: #262626; font-weight: 500; font-size: 14px; text-decoration: none; }
+.sso-btn:hover { background: #fafafa; }
+.checks { list-style: none; margin: 0; padding: 10px 14px; border: 1px solid var(--border); border-radius: 14px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.checks li { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+.checks small { color: var(--muted); word-break: break-all; }
+.checks .pass b { color: #16a34a; }
+.checks .fail b { color: #dc2626; }

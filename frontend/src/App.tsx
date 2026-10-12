@@ -1,7 +1,8 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
-import { api, config, type User, type Workspace } from './lib/api'
+import { api, config, API_URL, type User, type Workspace } from './lib/api'
 import WorkspaceHome from './WorkspaceHome'
 import Icon, { type IconName } from './Icon'
+import ProviderLogo from './ProviderLogo'
 import './App.css'
 
 type Step = 'register' | 'verify' | 'login' | 'dashboard'
@@ -74,11 +75,11 @@ const tenantSlug = (() => {
 })()
 
 // Token handed over from the main site after login (storage is per subdomain)
-const hashToken = new URLSearchParams(location.hash.slice(1)).get('token')
-if (hashToken) {
-  localStorage.setItem(TOKEN_KEY, hashToken)
-  history.replaceState(null, '', location.pathname)
-}
+const hashParams = new URLSearchParams(location.hash.slice(1))
+const hashToken = hashParams.get('token')
+const ssoError = hashParams.get('sso_error') ?? ''
+if (hashToken) localStorage.setItem(TOKEN_KEY, hashToken)
+if (hashToken || ssoError) history.replaceState(null, '', location.pathname)
 
 const randomSuffix = () => Math.random().toString(36).slice(2, 6)
 
@@ -87,9 +88,9 @@ function App() {
   const [token, setToken] = useState<string | null>(() => localStorage.getItem(TOKEN_KEY) ?? sessionStorage.getItem(TOKEN_KEY))
   const [user, setUser] = useState<User | null>(null)
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
-  const [error, setError] = useState('')
+  const [error, setError] = useState(ssoError)
   const [info, setInfo] = useState('')
-  const [tenant, setTenant] = useState<{ name: string } | 'missing' | null>(null)
+  const [tenant, setTenant] = useState<{ name: string; slug: string; sso_providers: { key: string; name: string }[] } | 'missing' | null>(null)
   const [busy, setBusy] = useState(false)
 
   const [name, setName] = useState('')
@@ -149,7 +150,7 @@ function App() {
   // Resolve the tenant from the subdomain
   useEffect(() => {
     if (!tenantSlug) return
-    api<{ name: string }>(`/api/workspaces/by-slug/${tenantSlug}`)
+    api<Exclude<typeof tenant, 'missing' | null>>(`/api/workspaces/by-slug/${tenantSlug}`)
       .then(setTenant)
       .catch((e: Error) => (e.message === 'Workspace not found' ? setTenant('missing') : setError(`Cannot reach the API: ${e.message}`)))
   }, [])
@@ -383,6 +384,19 @@ function App() {
               {busy ? 'Signing in…' : 'Sign in'}
             </button>
           </form>
+          {tenant && tenant.sso_providers.length > 0 && (
+            <>
+              <div className="or">OR</div>
+              <div className="sso-list">
+                {tenant.sso_providers.map((p) => (
+                  <a key={p.key} className="sso-btn" href={`${API_URL}/api/auth/saml/${tenant.slug}/${p.key}/login`}>
+                    <ProviderLogo id={p.key} size={20} />
+                    {p.key === 'saml' ? 'Sign in with SSO' : `Sign in with ${p.name.replace(/ \(.*\)$/, '')}`}
+                  </a>
+                ))}
+              </div>
+            </>
+          )}
           <p className="alt">
             Don't have an account? <button className="link" onClick={() => goto('register')}>Register</button>
           </p>
