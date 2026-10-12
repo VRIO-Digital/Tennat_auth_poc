@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { api, type Workspace } from './lib/api'
 import Icon, { type IconName } from './Icon'
 import ProviderLogo from './ProviderLogo'
+import { GUIDES } from './providerGuides'
 
 const ROLES = [
   { key: 'platform_admin', label: 'Platform Admin', desc: 'Full access to workspace settings and users' },
@@ -400,11 +401,37 @@ type Provider = {
   sp: { entity_id: string; acs_url: string }
 }
 
+function CopyValue({ label, value }: { label: string; value: string }) {
+  const [copied, setCopied] = useState(false)
+  return (
+    <div className="copy-row">
+      <span>{label}</span>
+      <div>
+        <code>{value}</code>
+        <button
+          type="button"
+          className="copy"
+          onClick={() => {
+            navigator.clipboard.writeText(value)
+            setCopied(true)
+            setTimeout(() => setCopied(false), 1500)
+          }}
+        >
+          <Icon name={copied ? 'check' : 'copy'} size={14} />
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function ProviderRow({ ws, token, p, onSaved }: { ws: Workspace; token: string; p: Provider; onSaved: (p: Provider) => void }) {
   const [open, setOpen] = useState(false)
   const [cfg, setCfg] = useState(p.config)
   const { error, ok, busy, run } = useAction()
   const [checks, setChecks] = useState<{ name: string; ok: boolean; detail: string }[]>([])
+  const [guideOpen, setGuideOpen] = useState(false)
+  const guide = GUIDES[p.key] ?? GUIDES.saml
   const path = `/api/workspaces/${ws.workspace_id}/auth-providers/${p.key}`
 
   useEffect(() => {
@@ -490,16 +517,40 @@ function ProviderRow({ ws, token, p, onSaved }: { ws: Workspace; token: string; 
             save(true)
           }}
         >
+          <button type="button" className={`guide-toggle ${guideOpen ? 'on' : ''}`} onClick={() => setGuideOpen(!guideOpen)} aria-expanded={guideOpen}>
+            <span className="guide-icon">?</span>
+            <span>
+              <strong>How to configure {p.name}</strong>
+              <small>{guideOpen ? 'Hide the step-by-step guide' : 'Step-by-step setup guide'}</small>
+            </span>
+            <Icon name="chevron" size={16} />
+          </button>
+          {guideOpen && (
+            <div className="guide">
+              <p className="guide-lead">
+                Follow these steps in {guide.url ? <a href={guide.url} target="_blank" rel="noreferrer">{guide.console}</a> : guide.console}, using the values from step 1 and filling in step 2 below.
+              </p>
+              <ol>
+                {guide.steps.map((s, i) => (
+                  <li key={i}>{s.replaceAll('{entity}', p.sp.entity_id).replaceAll('{acs}', p.sp.acs_url)}</li>
+                ))}
+              </ol>
+              <p className="guide-map">
+                <strong>What to copy back:</strong> {guide.idpMap}
+              </p>
+            </div>
+          )}
           <div className="sp">
-            <strong>Add these in {p.name}</strong>
-            <label>
-              Entity ID (Identifier)
-              <code>{p.sp.entity_id}</code>
-            </label>
-            <label>
-              Reply URL (ACS)
-              <code>{p.sp.acs_url}</code>
-            </label>
+            <div className="step-head">
+              <b>1</b>
+              <strong>Copy these into {p.name}</strong>
+            </div>
+            <CopyValue label="Entity ID (Identifier / Audience)" value={p.sp.entity_id} />
+            <CopyValue label="Reply URL (ACS / Consumer URL)" value={p.sp.acs_url} />
+          </div>
+          <div className="step-head">
+            <b>2</b>
+            <strong>Paste these from {p.name}</strong>
           </div>
           <label className="field">
             <span>Login URL (SSO URL)</span>
