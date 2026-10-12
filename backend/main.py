@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 import json
+import re
 import secrets
 
 from fastapi import FastAPI, HTTPException, Depends
@@ -33,26 +34,77 @@ from jose import jwt
 # CONFIG
 # =========================================================
 
+DEV_SECRET = "local-development-secret"
+
+
 class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
+    # development | production
+    ENVIRONMENT: str = "development"
+
     DATABASE_URL: str = "sqlite:///./app.db"
 
+    # JWT
+    SECRET_KEY: str = DEV_SECRET
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_HOURS: int = 8
+    VERIFICATION_EXPIRE_MINUTES: int = 30
+
+    # Workspace URLs: {scheme}://{slug}.{BASE_DOMAIN}
+    BASE_DOMAIN: str = "localhost:5173"
+    URL_SCHEME: str = "http"
+
+    # Public URL of this API (used in SAML ACS URLs and dev verification links)
+    API_BASE_URL: str = "http://localhost:8000"
+
+    # CORS: comma-separated origins, plus an optional regex for tenant subdomains
+    CORS_ORIGINS: str = "http://localhost:5173"
+    CORS_ORIGIN_REGEX: str = ""
+
+    # Return the email-verification link in the register response (dev only)
+    EXPOSE_VERIFICATION_URL: bool | None = None
+
+
+settings = Settings()
+
+IS_PRODUCTION = settings.ENVIRONMENT.lower() == "production"
+
+if IS_PRODUCTION and settings.SECRET_KEY == DEV_SECRET:
+
+    raise RuntimeError(
+        "SECRET_KEY must be set to a strong random value in production"
+    )
 
 # The app uses a sync engine, so map the async driver to psycopg
 DATABASE_URL = (
-    Settings()
-    .DATABASE_URL
+    settings.DATABASE_URL
     .replace("postgresql+asyncpg://", "postgresql+psycopg://")
     .replace("postgresql://", "postgresql+psycopg://")
+    .replace("postgres://", "postgresql+psycopg://")
 )
 
-SECRET_KEY = "local-development-secret"
-ALGORITHM = "HS256"
+SECRET_KEY = settings.SECRET_KEY
+ALGORITHM = settings.JWT_ALGORITHM
 
-BASE_DOMAIN = "localhost:5173"
-URL_SCHEME = "http"
+BASE_DOMAIN = settings.BASE_DOMAIN
+URL_SCHEME = settings.URL_SCHEME
+API_BASE_URL = settings.API_BASE_URL.rstrip("/")
+
+CORS_ORIGINS = [
+    o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()
+]
+
+CORS_ORIGIN_REGEX = settings.CORS_ORIGIN_REGEX or (
+    rf"^{re.escape(URL_SCHEME)}://[a-z0-9-]+\.{re.escape(BASE_DOMAIN)}$"
+)
+
+EXPOSE_VERIFICATION_URL = (
+    settings.EXPOSE_VERIFICATION_URL
+    if settings.EXPOSE_VERIFICATION_URL is not None
+    else not IS_PRODUCTION
+)
 
 
 # =========================================================
@@ -318,7 +370,7 @@ def create_access_token(
     payload = {
         "sub": str(user_id),
         "exp": datetime.utcnow()
-        + timedelta(hours=8),
+        + timedelta(hours=settings.ACCESS_TOKEN_EXPIRE_HOURS),
     }
 
     return jwt.encode(
@@ -418,11 +470,9 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
 
-    allow_origins=[
-        "http://localhost:5173",
-    ],
+    allow_origins=CORS_ORIGINS,
 
-    allow_origin_regex=r"^http://[a-z0-9-]+\.localhost:5173$",
+    allow_origin_regex=CORS_ORIGIN_REGEX,
 
     allow_credentials=True,
 
@@ -519,7 +569,7 @@ def register(
 
         verification_expires=(
             datetime.utcnow()
-            + timedelta(minutes=30)
+            + timedelta(minutes=settings.VERIFICATION_EXPIRE_MINUTES)
         ),
     )
 
@@ -529,14 +579,7 @@ def register(
 
     db.refresh(user)
 
-    # Local development only
-    verification_url = (
-        "http://localhost:8000"
-        "/api/auth/verify-email?token="
-        + verification_token
-    )
-
-    return {
+    response = {
 
         "message":
             "Registration successful. Please verify your email.",
@@ -546,10 +589,17 @@ def register(
 
         "email":
             user.email,
-
-        "verification_url":
-            verification_url,
     }
+
+    # Development only: no email is sent, so hand back the link
+    if EXPOSE_VERIFICATION_URL:
+
+        response["verification_url"] = (
+            f"{API_BASE_URL}/api/auth/verify-email"
+            f"?token={verification_token}"
+        )
+
+    return response
 
 
 # =========================================================
@@ -1385,14 +1435,12 @@ def provider_view(workspace: Workspace, key: str, row: AuthProvider | None):
 
     config = json.loads(row.config) if row else {}
 
-    api_base = "http://localhost:8000"
-
     return {
         "enabled": bool(row and row.enabled),
         "config": {f: config.get(f, "") for f in SAML_FIELDS},
         "sp": {
             "entity_id": f"{URL_SCHEME}://{workspace.slug}.{BASE_DOMAIN}/saml/metadata",
-            "acs_url": f"{api_base}/api/auth/saml/{workspace.slug}/{key}/acs",
+            "acs_url": f"{API_BASE_URL}/api/auth/saml/{workspace.slug}/{key}/acs",
         },
     }
 

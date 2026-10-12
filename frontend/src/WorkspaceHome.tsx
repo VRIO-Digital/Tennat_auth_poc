@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { api, type Workspace } from './lib/api'
+import { api, BASE_DOMAIN, type Workspace } from './lib/api'
 import Icon, { type IconName } from './Icon'
 import ProviderLogo from './ProviderLogo'
 
@@ -396,7 +396,7 @@ function AddressCard({ ws, token }: { ws: Workspace; token: string }) {
   const [slug, setSlug] = useState(ws.slug)
   const [status, setStatus] = useState<{ available: boolean; reason: string | null } | null>(null)
   const { error, busy, run } = useAction()
-  const suffix = `.${location.host.split('.').slice(1).join('.') || 'localhost:5173'}`
+  const suffix = `.${BASE_DOMAIN}`
   const changed = slug !== ws.slug
 
   useEffect(() => {

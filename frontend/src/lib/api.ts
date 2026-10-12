@@ -1,5 +1,8 @@
 export const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 
+// Workspaces live at {slug}.{BASE_DOMAIN}
+export const BASE_DOMAIN: string = import.meta.env.VITE_BASE_DOMAIN ?? 'localhost:5173'
+
 export async function api<T>(
   path: string,
   init?: RequestInit & { token?: string | null },

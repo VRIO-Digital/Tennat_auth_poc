@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
-import { api, type User, type Workspace } from './lib/api'
+import { api, BASE_DOMAIN, type User, type Workspace } from './lib/api'
 import WorkspaceHome from './WorkspaceHome'
 import Icon, { type IconName } from './Icon'
 import './App.css'
@@ -65,8 +65,13 @@ function slugify(s: string) {
     .replace(/^-+|-+$/g, '')
 }
 
-// Tenant subdomain, e.g. "acme" for acme.localhost:5173
-const tenantSlug = location.hostname.endsWith('.localhost') ? location.hostname.split('.')[0] : null
+// Tenant subdomain, e.g. "acme" for acme.<BASE_DOMAIN>
+const tenantSlug = (() => {
+  const suffix = `.${BASE_DOMAIN}`
+  if (!location.host.endsWith(suffix)) return null
+  const slug = location.host.slice(0, -suffix.length)
+  return slug && !slug.includes('.') ? slug : null
+})()
 
 // Token handed over from the main site after login (storage is per subdomain)
 const hashToken = new URLSearchParams(location.hash.slice(1)).get('token')
@@ -170,11 +175,11 @@ function App() {
   const register = (e: FormEvent) => {
     e.preventDefault()
     run(async () => {
-      const r = await api<{ verification_url: string }>('/api/auth/register', {
+      const r = await api<{ verification_url?: string }>('/api/auth/register', {
         method: 'POST',
         body: JSON.stringify({ name, email, password }),
       })
-      setDevToken(new URL(r.verification_url).searchParams.get('token') ?? '')
+      setDevToken(r.verification_url ? (new URL(r.verification_url).searchParams.get('token') ?? '') : '')
       setStep('verify')
     })
   }
